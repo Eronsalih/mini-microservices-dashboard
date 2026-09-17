@@ -13,15 +13,16 @@ permissions:
   contents: read
 
 jobs:
-  # =========================================================
-  # JOB 1 - BUILD AND PUSH TO DOCKER HUB
-  # =========================================================
+  # ==========================================================
+  # JOB 1 - BUILD AND PUSH 4 IMAGES TO DOCKER HUB
+  # ==========================================================
   build-and-push:
     name: Build & Push - ${{ matrix.service }}
     runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
+
       matrix:
         include:
           - service: frontend
@@ -74,58 +75,260 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # =========================================================
+  # ==========================================================
   # JOB 2 - DEPLOY TO VM
-  # =========================================================
+  # ==========================================================
   deploy:
     name: Deploy to VM
     runs-on: ubuntu-latest
 
     needs: build-and-push
 
-    # deploy vetëm kur bëhet push në main
+    # Deploy vetëm kur kemi push në main
     if: github.ref == 'refs/heads/main'
 
+    env:
+      VM_HOST: ${{ secrets.VM_HOST }}
+      VM_USERNAME: ${{ secrets.VM_USERNAME }}
+      VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
     steps:
+      # -------------------------------------------------------
+      # CHECKOUT
+      # -------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # -------------------------------------------------------
+      # VALIDATE SECRETS
+      # -------------------------------------------------------
+      - name: Validate deployment secrets
+        shell: bash
+        run: |
+          set -e
+
+          if [ -z "$VM_HOST" ]; then
+            echo "ERROR: VM_HOST secret is missing"
+            exit 1
+          fi
+
+          if [ -z "$VM_USERNAME" ]; then
+            echo "ERROR: VM_USERNAME secret is missing"
+            exit 1
+          fi
+
+          if [ -z "$VM_SSH_KEY" ]; then
+            echo "ERROR: VM_SSH_KEY secret is missing"
+            exit 1
+          fi
+
+          if [ -z "$DOCKERHUB_USERNAME" ]; then
+            echo "ERROR: DOCKERHUB_USERNAME secret is missing"
+            exit 1
+          fi
+
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "ERROR: DOCKERHUB_TOKEN secret is missing"
+            exit 1
+          fi
+
+          echo "All required secrets are present."
+
+      # -------------------------------------------------------
+      # CONFIGURE SSH PRIVATE KEY
+      # -------------------------------------------------------
       - name: Configure SSH
+        shell: bash
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "${{ secrets.VM_HOST }}" >> ~/.ssh/known_hosts
+          set -e
 
-      - name: Copy production Docker Compose to VM
+          mkdir -p "$HOME/.ssh"
+
+          printf '%s\n' "$VM_SSH_KEY" \
+            | tr -d '\r' \
+            > "$HOME/.ssh/deploy_key"
+
+          chmod 700 "$HOME/.ssh"
+          chmod 600 "$HOME/.ssh/deploy_key"
+
+          # Kontrollon nëse private key është valid
+          ssh-keygen -y \
+            -f "$HOME/.ssh/deploy_key" \
+            > /dev/null
+
+          echo "SSH private key configured successfully."
+
+      # -------------------------------------------------------
+      # TEST SSH CONNECTION
+      # -------------------------------------------------------
+      - name: Test SSH connection
+        shell: bash
         run: |
-          scp docker-compose.prod.yml \
-          "${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }}:/home/${{ secrets.VM_USERNAME }}/docker-compose.yml"
+          set -e
 
-      - name: Deploy containers
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            -o ConnectTimeout=15 \
+            "$VM_USERNAME@$VM_HOST" \
+            "echo 'SSH connection successful'"
+
+      # -------------------------------------------------------
+      # CREATE PROJECT DIRECTORY ON VM
+      # -------------------------------------------------------
+      - name: Create project directory on VM
+        shell: bash
         run: |
-          ssh "${{ secrets.VM_USERNAME }}@${{ secrets.VM_HOST }}" << 'EOF'
+          set -e
 
-            set -e
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            "$VM_USERNAME@$VM_HOST" \
+            "mkdir -p ~/mini-microservices-dashboard"
 
-            cd /home/${{ secrets.VM_USERNAME }}
+      # -------------------------------------------------------
+      # CREATE PRODUCTION ENV FILE
+      # -------------------------------------------------------
+      - name: Create production environment file
+        shell: bash
+        run: |
+          set -e
 
-            echo "Logging in to Docker Hub..."
+          printf 'DOCKERHUB_USERNAME=%s\n' \
+            "$DOCKERHUB_USERNAME" \
+            > .env.deploy
 
-            echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login \
-              -u "${{ secrets.DOCKERHUB_USERNAME }}" \
-              --password-stdin
+      # -------------------------------------------------------
+      # COPY DOCKER COMPOSE TO VM
+      # -------------------------------------------------------
+      - name: Copy Docker Compose file to VM
+        shell: bash
+        run: |
+          set -e
 
-            echo "Pulling latest Docker images..."
-            docker compose pull
+          scp \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            docker-compose.prod.yml \
+            "$VM_USERNAME@$VM_HOST:~/mini-microservices-dashboard/docker-compose.yml"
 
-            echo "Starting containers..."
-            docker compose up -d
+      # -------------------------------------------------------
+      # COPY ENV FILE TO VM
+      # -------------------------------------------------------
+      - name: Copy environment file to VM
+        shell: bash
+        run: |
+          set -e
 
-            echo "Removing unused images..."
-            docker image prune -f
+          scp \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            .env.deploy \
+            "$VM_USERNAME@$VM_HOST:~/mini-microservices-dashboard/.env"
 
-            echo "Running containers:"
-            docker compose ps
+      # -------------------------------------------------------
+      # LOGIN TO DOCKER HUB ON VM
+      # -------------------------------------------------------
+      - name: Login to Docker Hub on VM
+        shell: bash
+        run: |
+          set -e
 
-          EOF
+          printf '%s' "$DOCKERHUB_TOKEN" | \
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            "$VM_USERNAME@$VM_HOST" \
+            "sudo docker login -u '$DOCKERHUB_USERNAME' --password-stdin"
+
+      # -------------------------------------------------------
+      # DEPLOY APPLICATION
+      # -------------------------------------------------------
+      - name: Deploy application
+        shell: bash
+        run: |
+          set -e
+
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            "$VM_USERNAME@$VM_HOST" \
+            '
+              set -e
+
+              cd ~/mini-microservices-dashboard
+
+              echo "===================================="
+              echo "Pulling latest Docker images..."
+              echo "===================================="
+
+              sudo docker compose pull
+
+              echo "===================================="
+              echo "Starting containers..."
+              echo "===================================="
+
+              sudo docker compose up -d --remove-orphans
+
+              echo "===================================="
+              echo "Removing unused Docker images..."
+              echo "===================================="
+
+              sudo docker image prune -f
+
+              echo "===================================="
+              echo "Running containers:"
+              echo "===================================="
+
+              sudo docker compose ps
+            '
+
+      # -------------------------------------------------------
+      # VERIFY DEPLOYMENT
+      # -------------------------------------------------------
+      - name: Verify deployment
+        shell: bash
+        run: |
+          set -e
+
+          ssh \
+            -i "$HOME/.ssh/deploy_key" \
+            -o StrictHostKeyChecking=accept-new \
+            "$VM_USERNAME@$VM_HOST" \
+            '
+              cd ~/mini-microservices-dashboard
+
+              sleep 5
+
+              echo "Checking running containers..."
+
+              RUNNING=$(sudo docker compose ps --status running -q | wc -l)
+
+              echo "Running containers: $RUNNING"
+
+              if [ "$RUNNING" -lt 4 ]; then
+                echo "ERROR: Not all 4 containers are running."
+
+                sudo docker compose ps
+                sudo docker compose logs --tail=50
+
+                exit 1
+              fi
+
+              echo "Deployment successful."
+              echo "All 4 containers are running."
+            '
+
+      # -------------------------------------------------------
+      # CLEANUP RUNNER
+      # -------------------------------------------------------
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$HOME/.ssh/deploy_key"
+          rm -f .env.deploy
