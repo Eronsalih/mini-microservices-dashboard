@@ -1,0 +1,29 @@
+services:
+
+  frontend:
+    image: ${DOCKERHUB_USERNAME:-eronsalihu}/mini-microservices-frontend:latest
+    container_name: mini-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+
+  user-service:
+    image: ${DOCKERHUB_USERNAME:-eronsalihu}/mini-microservices-user-service:latest
+    container_name: user-service
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+
+  task-service:
+    image: ${DOCKERHUB_USERNAME:-eronsalihu}/mini-microservices-task-service:latest
+    container_name: task-service
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+
+  message-service:
+    image: ${DOCKERHUB_USERNAME:-eronsalihu}/mini-microservices-message-service:latest
+    container_name: message-service
+    restart: unless-stopped
+    ports:
+      - "8003:8000"
