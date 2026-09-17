@@ -1,0 +1,69 @@
+services:
+  user-service:
+    build:
+      context: ./backend/user-service
+    container_name: mini-user-service
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
+    networks:
+      - mini-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  task-service:
+    build:
+      context: ./backend/task-service
+    container_name: mini-task-service
+    ports:
+      - "8002:8000"
+    restart: unless-stopped
+    networks:
+      - mini-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  message-service:
+    build:
+      context: ./backend/message-service
+    container_name: mini-message-service
+    ports:
+      - "8003:8000"
+    restart: unless-stopped
+    networks:
+      - mini-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: mini-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      user-service:
+        condition: service_healthy
+      task-service:
+        condition: service_healthy
+      message-service:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - mini-net
+
+networks:
+  mini-net:
+    driver: bridge
